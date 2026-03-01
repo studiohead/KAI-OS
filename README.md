@@ -1,6 +1,6 @@
-# KAI OS — AArch64 Bare-Metal Kernel
+# KAI OS — Kernel AI Operating System
 
-A minimal AArch64 bare-metal kernel targeting the QEMU `virt` board, with a
+A minimal kernel targeting the QEMU `virt` board, with a
 capability-gated syscall interface and a lightweight AI tool sandbox.
 
 ---
