@@ -146,7 +146,7 @@ The default session starts with `CAP_MMIO | CAP_READ_MEM`.
 
 ## Author
 
-**Steve** — KAI OS
+**Stephen Johnny Davis**
 
 ---
 
