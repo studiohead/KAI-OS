@@ -36,6 +36,39 @@ extern "C" {
 // -----------------------------------------------------------------------------
 int sys_uart_write(const char *buf, size_t len, uint32_t caller_caps);
 
+// -----------------------------------------------------------------------------
+// Syscall: UART Put String
+// Writes a null-terminated string to UART.
+//
+// This is a convenience wrapper around sys_uart_write that automatically
+// calculates the string length by scanning until the null terminator.
+//
+// Parameters:
+//   - str         : Pointer to null-terminated string
+//   - caller_caps : Bitmask of caller capabilities (requires CAP_MMIO)
+//
+// Returns:
+//   - >=0 : Number of bytes successfully written (excluding null terminator)
+//   -  -1 : Failure (invalid caps or NULL pointer)
+// -----------------------------------------------------------------------------
+int sys_uart_puts(const char *str, uint32_t caller_caps);
+
+
+// -----------------------------------------------------------------------------
+// Syscall: UART Put Character
+// Writes a single character to UART.
+//
+// This is a convenience wrapper around sys_uart_write for single-byte output.
+//
+// Parameters:
+//   - c           : Character to write
+//   - caller_caps : Bitmask of caller capabilities (requires CAP_MMIO)
+//
+// Returns:
+//   - 1  : Success
+//   - -1 : Failure (caller lacks CAP_MMIO)
+// -----------------------------------------------------------------------------
+int sys_uart_putc(char c, uint32_t caller_caps);
 
 // -----------------------------------------------------------------------------
 // Syscall: UART Hex 64-bit

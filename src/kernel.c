@@ -17,7 +17,6 @@
 #include <kernel/string.h>
 #include <kernel/syscall.h>
 #include <kernel/uart.h>
-
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -232,15 +231,14 @@ void kernel_main(void)
     sandbox_init(&sb_ctx, session.caps);
 
     /* Normal banner */
-    sys_uart_write("========================\n", 26, session.caps);
-    sys_uart_write("      Kernel AI OS      \n", 26, session.caps);
-    sys_uart_write("========================\n", 26, session.caps);
+    sys_uart_puts("========================\n", session.caps);
+    sys_uart_puts("      Kernel AI OS      \n", session.caps);
+    sys_uart_puts("========================\n", session.caps);
 
-    sys_uart_write("EL: ", 4, session.caps);
+    sys_uart_puts("EL: ", session.caps);
     char el_char = '0' + (char)current_el();
-    sys_uart_write(&el_char, 1, session.caps);
-    sys_uart_write("   |   Type 'help' for commands\n",
-                   KSTRLEN("   |   Type 'help' for commands\n"),
+    sys_uart_puts(&el_char, session.caps);
+    sys_uart_puts("   |   Type 'help' for commands\n",
                    session.caps);
 
     sys_uart_write(PROMPT, KSTRLEN(PROMPT), session.caps);
