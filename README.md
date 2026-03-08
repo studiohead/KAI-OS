@@ -1,4 +1,4 @@
-# KAI OS — Kernel AI Operating System
+# KAI — Kernel AI
 
 How do you give an AI model meaningful control over a system without giving it arbitrary code execution?
 
