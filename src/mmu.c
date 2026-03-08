@@ -48,7 +48,6 @@ static void map_2mb(uint64_t *l2, uint64_t va, uint64_t pa, uint64_t attr);
  * ====================================================================== */
 void mmu_init(void)
 {
-    uart_puts("[mmu] zeroing table space...\r\n");
     
     /* Zero the 3 pages (12KB) allocated for tables in linker script */
     volatile uint64_t *table_ptr = (volatile uint64_t *)__page_tables_start;
@@ -60,32 +59,21 @@ void mmu_init(void)
     L1_TABLE[0] = table_desc(L2_GB0);   /* 0x00000000–0x3FFFFFFF */
     L1_TABLE[1] = table_desc(L2_GB1);   /* 0x40000000–0x7FFFFFFF */
 
-    uart_puts("[mmu] L1[0]="); uart_hex64(L1_TABLE[0]); uart_puts("\r\n");
-    uart_puts("[mmu] L1[1]="); uart_hex64(L1_TABLE[1]); uart_puts("\r\n");
-    uart_puts("[mmu] L2_GB0 @ "); uart_hex64((uint64_t)(uintptr_t)L2_GB0); uart_puts("\r\n");
-    uart_puts("[mmu] L2_GB1 @ "); uart_hex64((uint64_t)(uintptr_t)L2_GB1); uart_puts("\r\n");
 
     /* ---- MMIO in GB0 --------- */
     map_2mb(L2_GB0, 0x08000000ULL, 0x08000000ULL, PTE_DEVICE_RW);
     map_2mb(L2_GB0, 0x09000000ULL, 0x09000000ULL, PTE_DEVICE_RW);
-    uart_puts("[mmu] L2_GB0[GIC]="); uart_hex64(L2_GB0[0x08000000ULL >> 21 & 0x1FF]); uart_puts("\r\n");
-    uart_puts("[mmu] L2_GB0[UART]="); uart_hex64(L2_GB0[0x09000000ULL >> 21 & 0x1FF]); uart_puts("\r\n");
 
     /* ---- Kernel in GB1 ---- */
     uint64_t kend = (uint64_t)(uintptr_t)__kernel_end;
     uint64_t scratch_base = (uint64_t)(uintptr_t)__sandbox_scratch_start;
     uint64_t scratch_2mb_aligned = scratch_base & ~0x1FFFFFULL;
 
-    uart_puts("[mmu] kend="); uart_hex64(kend); uart_puts("\r\n");
-    uart_puts("[mmu] scratch_2mb="); uart_hex64(scratch_2mb_aligned); uart_puts("\r\n");
 
     for (uint64_t va = 0x40000000ULL; va < kend; va += (1ULL << 21)) {
         map_2mb(L2_GB1, va, va, PTE_KERNEL_RWX);
-        uart_puts("[mmu] L2_GB1["); uart_hex64(va); uart_puts("]=");
-        uart_hex64(L2_GB1[(va >> 21) & 0x1FF]); uart_puts("\r\n");
     }
     map_2mb(L2_GB1, scratch_2mb_aligned, scratch_2mb_aligned, PTE_EL0_RW);
-    uart_puts("[mmu] L2_GB1[scratch]="); uart_hex64(L2_GB1[(scratch_2mb_aligned >> 21) & 0x1FF]); uart_puts("\r\n");
 
     /* Ensure all table writes are flushed to RAM before the MMU hardware reads them */
     __asm__ volatile ("dsb sy" ::: "memory");
@@ -99,13 +87,11 @@ extern void mmu_enable_asm(uint64_t ttbr0, uint64_t ttbr1,
 
 void mmu_enable(void)
 {
-    uart_puts("[mmu] preparing registers...\r\n");
 
     /* Values pulled directly from include/kernel/mmu.h constants */
     uint64_t mair = MAIR_VALUE;
     uint64_t tcr  = TCR_VALUE;
 
-    uart_puts("[mmu] jumping to mmu_enable_asm...\r\n");
 
     /* * We pass L1_TABLE as TTBR0. In a non-identity map, TTBR1 would 
      * point to a separate kernel-only table, but for now, we use a 
@@ -121,7 +107,6 @@ void mmu_enable(void)
     /* * After this point, the CPU uses the page tables. If identity mapping
      * is incorrect, the PC will jump to a fault or the UART will hang.
      */
-    uart_puts("[mmu] enabled and identity mapped.\r\n");
 }
 
 static void map_2mb(uint64_t *l2, uint64_t va, uint64_t pa, uint64_t attr)

@@ -262,27 +262,22 @@ void kernel_main(void)
 {
     /* 1. UART Init */
     uart_init();
-    uart_puts("[boot] uart ok\r\n");
 
     /* 2. MMU Init */
     mmu_init();
     mmu_enable();
-    uart_puts("[boot] mmu ok\r\n");
 
     /* 3. Exception Vectors (VBAR) */
     /* Sync with mmu.S: Using vbar_install to load kai_vector_table */
     vbar_install(); 
-    uart_puts("[boot] vbar ok\r\n");
 
     /* 4. GIC Init */
     irq_init();
-    uart_puts("[boot] gic ok\r\n");
 
     /* 5. AI Session & Sandbox Preparation 
      * NOTE: If the kernel hangs here, the MMU mapping for the 
      * sandbox scratchpad (0x40400000) is likely missing.
      */
-    uart_puts("[boot] entering sandbox_init...\r\n");
     ai_session_t session = { .caps = CAP_MMIO | CAP_READ_MEM | CAP_UART_WRITE };
     intent_object_t intent = {
         .caps = session.caps,
@@ -290,7 +285,6 @@ void kernel_main(void)
         .pipeline = NULL
     };
     sandbox_init(&sb_ctx, &intent);
-    uart_puts("[boot] sandbox ok\r\n");
 
     /* 6. Welcome Banner */
     uart_puts("\r\n========================\r\n");
