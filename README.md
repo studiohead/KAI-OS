@@ -11,7 +11,7 @@ KAI is a formally verified, capability-gated, pipeline-based command language th
 - [Features](#features)
 - [Project Layout](#project-layout)
 - [Requirements](#requirements)
-- [Build & Run](#build--run)
+- [Build & Run](#build-and-run)
 - [Shell Commands](#shell-commands)
 - [Sandbox Tool Calls](#sandbox-tool-calls)
 - [AIQL Pipeline Execution](#aiql-pipeline-execution)
@@ -42,7 +42,7 @@ KAI is a formally verified, capability-gated, pipeline-based command language th
 - **Pre-execution AST verifier** (opcode whitelist, argument validation, address checks)
 - **Hard instruction count limit** per invocation
 - **Isolated scratch buffer** — sandboxed writes never reach kernel memory; scratch page is the only EL0-accessible region
-- **AIQL pipeline engine** — multi-step pipeline execution derived from the AIQL AST schema
+- **AIQL (https://github.com/studiohead/AIQL) pipeline engine** — multi-step pipeline execution derived from the AIQL AST schema
 - **New opcodes**: `sleep` (timer-based delay), `introspect` (MMIO map query), `wait_event` (WFE yield stub)
 - **KAI Script Compiler** — host-side Python tool compiles `.kai` scripts to pipeline strings
 
