@@ -61,6 +61,10 @@ C_SRCS   := \
     $(SRC_DIR)/memory.c                  \
     $(SRC_DIR)/mmu.c                     \
     $(SRC_DIR)/irq.c                     \
+    $(SRC_DIR)/kai_node.c                \
+    $(SRC_DIR)/kai_interner.c            \
+    $(SRC_DIR)/kai_dag.c                 \
+    $(SRC_DIR)/kai_scheduler.c           \
     $(SRC_DIR)/sandbox/sandbox.c         \
     $(SRC_DIR)/sandbox/interpreter.c     \
     $(SRC_DIR)/sandbox/verifier.c        \

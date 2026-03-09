@@ -15,6 +15,10 @@
 #include <kernel/sandbox.h>
 #include <kernel/intent.h>
 #include <kernel/memory.h>
+#include <kernel/kai_node.h>
+#include <kernel/kai_interner.h>
+#include <kernel/kai_dag.h>
+#include <kernel/kai_scheduler.h>
 #include <kernel/mmu.h>
 #include <kernel/irq.h>
 #include <kernel/string.h>
@@ -59,6 +63,11 @@ typedef struct {
  * with the user shell, enabling 'reflexes' that the user can monitor. */
 static sandbox_ctx_t sb_ctx;
 
+/* ---- KAI IR globals -------------------------------------------------- */
+/* The interner is global so nodes are deduplicated across successive 'dag'
+ * commands in the same session. The DAG is rebuilt per invocation. */
+static kai_interner_t kai_intern;
+
 /* ---- Command typedef must come first --------------------------------- */
 typedef struct {
     const char *name;
@@ -91,6 +100,7 @@ static void cmd_mem(const char *args, ai_session_t *session);
 static void cmd_echo(const char *args, ai_session_t *session);
 static void cmd_sandbox(const char *args, ai_session_t *session);
 static void cmd_pipeline(const char *args, ai_session_t *session);
+static void cmd_dag(const char *args, ai_session_t *session);
 static void cmd_irq(const char *args, ai_session_t *session);
 static void cmd_irq_bind(const char *args, ai_session_t *session);
 
@@ -104,6 +114,7 @@ static const command_t commands[] = {
     { "echo",     "Echo text back to the terminal",          cmd_echo     },
     { "sandbox",  "Run a sandboxed tool call",               cmd_sandbox  },
     { "pipeline", "Run a multi-step AIQL pipeline",          cmd_pipeline },
+    { "dag",      "Build DAG from pipeline and show schedule", cmd_dag     },
     { "irq_init", "Enable CPU IRQ delivery (start reflexes)", cmd_irq      },
     { "irq_bind", "Bind IRQ <num> to <pipeline>",            cmd_irq_bind },
 };
@@ -225,6 +236,67 @@ static void cmd_irq_bind(const char *args, ai_session_t *session)
     }
 }
 
+/* dag — Build DAG from a pipeline string, run scheduler, print plan */
+static void cmd_dag(const char *args, ai_session_t *session)
+{
+    if (!args || args[0] == '\0') {
+        sys_uart_write("usage: dag <step1>; <step2>; ...\r\n",
+                       34, session->caps);
+        return;
+    }
+
+    /* Stage 1: Parse pipeline text into pipeline_t */
+    pipeline_t pipeline;
+    if (!interpreter_parse_pipeline(args, &pipeline)) {
+        sys_uart_write("[dag] pipeline parse error\r\n", 28, session->caps);
+        return;
+    }
+
+    /* Stage 2: Verify all steps */
+    if (!verifier_check_pipeline(&pipeline, session->caps)) {
+        sys_uart_write("[dag] pipeline verification failed\r\n", 36, session->caps);
+        return;
+    }
+
+    /* Stage 3: Build DAG — nodes are deduplicated via the global interner */
+    kai_dag_t dag;
+    if (!kai_dag_build_from_pipeline(&dag, &kai_intern, &pipeline)) {
+        sys_uart_write("[dag] DAG construction failed\r\n", 31, session->caps);
+        return;
+    }
+
+    sys_uart_write("[dag] nodes: ", 13, session->caps);
+    sys_uart_hex64((uint64_t)dag.node_count, session->caps);
+    sys_uart_write("\r\n", 2, session->caps);
+
+    /* Stage 4: Cycle detection (safety gate before scheduling) */
+    if (kai_dag_has_cycle(&dag)) {
+        sys_uart_write("[dag] error: cycle detected\r\n", 29, session->caps);
+        kai_dag_destroy(&dag);
+        return;
+    }
+
+    /* Stage 5: Build execution schedule */
+    kai_schedule_t schedule;
+    kai_sched_result_t res = kai_scheduler_build(&dag, &schedule);
+    if (res != KAI_SCHED_OK) {
+        sys_uart_write("[dag] scheduler error: ", 23, session->caps);
+        const char *msg = kai_sched_result_str(res);
+        sys_uart_write(msg, k_strlen(msg), session->caps);
+        sys_uart_write("\r\n", 2, session->caps);
+        kai_dag_destroy(&dag);
+        return;
+    }
+
+    /* Stage 6: Print the schedule */
+    kai_scheduler_print(&schedule, session->caps);
+
+    /* Stage 7: Print interner pool usage */
+    kai_interner_stats(&kai_intern, session->caps);
+
+    kai_dag_destroy(&dag);
+}
+
 /* Help list */
 static void cmd_help(const char *args, ai_session_t *session)
 {
@@ -289,6 +361,7 @@ void kernel_main(void)
         .pipeline = NULL
     };
     sandbox_init(&sb_ctx, &intent);
+    kai_interner_init(&kai_intern);
 
     /* 6. Welcome Banner */
     uart_puts(COL_BOLD COL_CYAN "========================\r\n");
