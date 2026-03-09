@@ -1,3 +1,5 @@
+<img width="1243" height="677" alt="image" src="https://github.com/user-attachments/assets/a41170a0-d8d6-4c25-93f7-77d6aa7141c0" />
+
 # KAI — Kernel AI
 
 How do you give an AI model meaningful control over a system without giving it arbitrary code execution?
