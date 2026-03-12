@@ -604,11 +604,15 @@ void kernel_main(void)
     char buf[CMD_BUF_SIZE];
     size_t index = 0U;
 
+    bool last_was_cr = false;
     while (true) {
         char c = uart_getc();
 
         /* ---- Enter / Return: dispatch the buffered command -------------- */
         if (c == '\r' || c == '\n') {
+            /* Swallow the \n of a \r\n pair to avoid a second empty dispatch */
+            if (c == '\n' && last_was_cr) { last_was_cr = false; continue; }
+            last_was_cr = (c == '\r');
             buf[index] = '\0';
             if (index > 0U) {
                 k_strcpy(history[hist_idx], buf);
@@ -622,6 +626,7 @@ void kernel_main(void)
             uart_puts(PROMPT);
             continue;
         }
+        last_was_cr = false;
 
         /* ---- Backspace -------------------------------------------------- */
         if ((c == '\x7F') || (c == '\x08')) {

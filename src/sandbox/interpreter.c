@@ -708,7 +708,9 @@ sandbox_result_t interpreter_exec(ast_node_t *node, sandbox_ctx_t *ctx)
                 UART_STR(",\"el\":"); UART_CHR((char)('0' + el_val));
             }
 
-            /* var store — emit every set variable as key:value */
+            /* var store — emit every set variable as key:value.
+             * If a string value exists in str_vars, emit it as "s":"...".
+             * Always emit the numeric hash as "v":"0x..." for completeness. */
             bool first_var = true;
             UART_STR(",\"vars\":{");
             for (size_t vi = 0; vi < VAR_STORE_SIZE; vi++) {
@@ -719,7 +721,7 @@ sandbox_result_t interpreter_exec(ast_node_t *node, sandbox_ctx_t *ctx)
                 UART_CHR('"');
                 UART_STR(ve->name);
                 UART_STR("\":{\"v\":\"0x");
-                /* hex encode value */
+                /* hex encode numeric value */
                 uint64_t v = ve->value;
                 char hex[17]; int hi = 16; hex[hi] = '\0';
                 do {
@@ -728,7 +730,18 @@ sandbox_result_t interpreter_exec(ast_node_t *node, sandbox_ctx_t *ctx)
                     v >>= 4;
                 } while (v && hi > 0);
                 UART_STR(hex + hi);
-                UART_STR("\"}");
+                UART_CHR('"');
+                /* also emit string value if present in str_vars — JSON-escaped */
+                char sbuf[MODEL_RESULT_MAX_LEN];
+                if (str_store_get(&ctx->str_vars, ve->name, sbuf, sizeof(sbuf))) {
+                    UART_STR(",\"s\":\"");
+                    for (const char *sp = sbuf; *sp; sp++) {
+                        if (*sp == '"' || *sp == '\\') UART_CHR('\\');
+                        UART_CHR(*sp);
+                    }
+                    UART_CHR('"');
+                }
+                UART_STR("}");
             }
             UART_CHR('}');
 
@@ -978,8 +991,8 @@ sandbox_result_t interpreter_exec_pipeline(pipeline_t *pipeline,
                 pline[pli] = '\0';
                 if (k_strncmp(pline, "RESULT:", 7) == 0) {
                     for (size_t si = 7; si + 9 < pli; si++) {
-                        if (k_strncmp(pline + si, "\"value\":\"", 10) == 0) {
-                            const char *vs = pline + si + 10;
+                        if (k_strncmp(pline + si, "\"value\":\"", 9) == 0) {
+                            const char *vs = pline + si + 9;
                             size_t vi2 = 0;
                             while (*vs && *vs != '"' && vi2 < sizeof(pbuf)-1)
                                 pbuf[vi2++] = *vs++;

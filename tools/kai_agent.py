@@ -218,34 +218,10 @@ def _make_model_call(exec_data: dict, provider: str, model: str,
         return f"error:{str(e)[:48]}"
 
 
-MODEL_RESULT_MAX_LEN = 240  # matches kernel MODEL_RESULT_MAX_LEN
+MODEL_RESULT_MAX_LEN = 128  # matches kernel MODEL_RESULT_MAX_LEN
 
 
-def handle_exec_packet(sock, line: str, provider: str, model: str,
-                       api_key: str) -> bool:
-    """
-    Called when a line starting with EXEC: is received from the kernel.
-    Makes the model call synchronously and writes RESULT: back.
-    Returns True if handled.
-    """
-    if not line.startswith("EXEC:"):
-        return False
-    try:
-        exec_data = json.loads(line[5:])
-    except json.JSONDecodeError:
-        # Malformed — send error result
-        exec_data = {}
-
-    print(c(f"  [exec]   {json.dumps(exec_data)}", C.AIQL), flush=True)
-
-    result_str = _make_model_call(exec_data, provider, model, api_key)
-    result_str = result_str.replace('"', "'").replace("\\", "/")  # safe for JSON
-
-    print(c(f"  [result] {result_str}", C.AIQL), flush=True)
-
-    result_pkt = json.dumps({"value": result_str}) + "\r\n"
-    sock.sendall(result_pkt.encode("utf-8"))
-    return True
+# handle_exec_packet removed — EXEC: is intercepted inline in send_command
 
 
 # ── Reflex listener ─────────────────────────────────────────────────────────
@@ -254,19 +230,28 @@ def handle_exec_packet(sock, line: str, provider: str, model: str,
 # queues them for the main agent loop to observe.
 
 _reflex_queue: list = []
-_reflex_lock = threading.Lock()
+_reflex_lock  = threading.Lock()
 _reflex_active = False
+_reflex_run   = threading.Event()   # SET = thread may recv; CLEAR = send_command owns socket
 
 def _reflex_reader(sock):
-    """Background thread: read lines, queue any RESPOND: packets."""
+    """Background thread: queue RESPOND: packets from IRQ-fired pipelines.
+    Checks _reflex_run BEFORE every recv so send_command gets clean ownership."""
     buf = b""
     while _reflex_active:
+        # Block here until send_command releases the socket
+        if not _reflex_run.wait(timeout=0.05):
+            buf = b""   # discard stale partial data on each pause cycle
+            continue
         try:
+            sock.settimeout(0.05)
             chunk = sock.recv(256)
             if not chunk:
                 break
             buf += chunk
-            while b"\n" in buf or b"\r" in buf:
+            # Normalise to \n then split cleanly
+            buf = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            while b"\n" in buf:
                 line, _, buf = buf.partition(b"\n")
                 line = _strip_ansi(line.decode("utf-8", errors="replace")).strip()
                 if line.startswith("RESPOND:"):
@@ -279,11 +264,21 @@ def _reflex_reader(sock):
                     except Exception:
                         pass
         except Exception:
-            break
+            pass
+
+def pause_reflex_listener():
+    """Block the reflex thread from doing any recv. Returns only after the
+    thread has finished its current 50ms recv window."""
+    _reflex_run.clear()
+    time.sleep(0.12)   # 2x thread's 50ms recv timeout — guarantees clean handoff
+
+def resume_reflex_listener():
+    _reflex_run.set()
 
 def start_reflex_listener(sock):
     global _reflex_active
     _reflex_active = True
+    _reflex_run.set()
     t = threading.Thread(target=_reflex_reader, args=(sock,), daemon=True)
     t.start()
     return t
@@ -291,6 +286,7 @@ def start_reflex_listener(sock):
 def stop_reflex_listener():
     global _reflex_active
     _reflex_active = False
+    _reflex_run.set()   # unblock thread so it can exit
 
 def drain_reflexes() -> list:
     """Return and clear all queued reflex packets."""
@@ -310,26 +306,128 @@ def drain(sock):
     sock.settimeout(0.1)
 
 def send_command(sock, cmd, provider="", model="", api_key="") -> list:
-    drain(sock)
-    # Send in small chunks with pauses — the kernel reads one char at a time
-    # via uart_getc() and the QEMU serial FIFO drops bytes if overwhelmed.
-    payload = (cmd + "\r\n").encode()
-    chunk_size = 32
-    for i in range(0, len(payload), chunk_size):
-        sock.sendall(payload[i:i+chunk_size])
-        time.sleep(0.01)   # 10ms between chunks — kernel processes ~3200 chars/sec
-    raw = recv_until_prompt(sock, timeout=20.0)
+    """
+    Send a command and collect output until kai# prompt returns.
+    Intercepts EXEC: packets inline so OP_MODEL_CALL works in all modes.
+    """
+    # Pause the reflex listener — after this returns the thread is guaranteed
+    # to be blocked on _reflex_run.wait() and not touching the socket.
+    pause_reflex_listener()
+    sock.settimeout(0.1)
+
+    # Drain any stale prompts left in the buffer from previous commands.
+    # The kernel emits multiple kai# prompts; we must consume them all
+    # before sending or the recv loop will return immediately on the old one.
+    stale = b""
+    try:
+        while True:
+            chunk = sock.recv(256)
+            if not chunk:
+                break
+            stale += chunk
+    except socket.timeout:
+        pass
+    if stale:
+        import os as _os2
+        if _os2.environ.get("KAI_DEBUG"):
+            print(f"  [drain] discarded {len(stale)}b: {repr(stale[:80])}", flush=True)
+
+    sock.settimeout(0.3)
+
+    # Chunked send — kernel reads uart_getc() one byte at a time.
+    payload = (cmd + "\r").encode()   # \r only — \r\n causes double prompt
+    for i in range(0, len(payload), 16):
+        sock.sendall(payload[i:i+16])
+        time.sleep(0.015)
+
     lines = []
-    for line in raw.splitlines():
-        line = _strip_ansi(line).strip()
-        if not line or line == cmd.strip():
-            continue
-        if line == PROMPT.strip() or line.endswith(PROMPT.strip()):
-            tail = line[:-len(PROMPT.strip())].strip()
-            if tail:
-                lines.append(tail)
-            continue
-        lines.append(line)
+    buf = ""
+    deadline = time.time() + 25.0
+    prompt = PROMPT.strip()   # "kai#"
+    import os as _os
+    _debug = _os.environ.get("KAI_DEBUG")
+
+    while time.time() < deadline:
+        try:
+            raw = sock.recv(256).decode("utf-8", errors="replace")
+            if raw:
+                buf += raw
+                deadline = time.time() + 25.0
+                if _debug:
+                    print(f"  [recv] {repr(raw)}", flush=True)
+        except socket.timeout:
+            if _debug and buf:
+                print(f"  [timeout] buf={repr(buf)}", flush=True)
+
+        # Normalise line endings — only needed when buf has new content
+        if buf:
+            buf = buf.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Scan buf for complete lines
+        while True:
+            if "\n" in buf:
+                line_raw, _, buf = buf.partition("\n")
+                line = _strip_ansi(line_raw).strip()
+            else:
+                break   # no complete line yet
+
+            if not line:
+                continue
+
+            if _debug:
+                print(f"  [raw] {repr(line)}", flush=True)
+
+            # ── Prompt: we're done ────────────────────────────────────────
+            if line == prompt or line.endswith(prompt):
+                tail = line[:-len(prompt)].strip() if line.endswith(prompt) else ""
+                if tail and tail != prompt:
+                    lines.append(tail)
+                resume_reflex_listener()
+                return lines
+
+            # ── EXEC: intercept ───────────────────────────────────────────
+            if line.startswith("EXEC:"):
+                try:
+                    exec_data = json.loads(line[5:])
+                except json.JSONDecodeError:
+                    exec_data = {"raw": line[5:]}
+                print(c(f"  [exec]   {json.dumps(exec_data)}", C.AIQL), flush=True)
+
+                if provider == "mock":
+                    result_str = "full_privilege_el1_all_caps_set"
+                elif api_key:
+                    result_str = _make_model_call(exec_data, provider, model, api_key)
+                else:
+                    result_str = "error:no-api-key"
+
+                print(c(f"  [result] {result_str}", C.AIQL), flush=True)
+                sock.sendall(("RESULT:" + json.dumps({"value": result_str}, separators=(",", ":")) + "\r\n").encode())
+                deadline = time.time() + 25.0
+                if _debug:
+                    print(f"  [sent-result] waiting for kernel to continue...", flush=True)
+                continue
+
+            # ── Skip echoed command ───────────────────────────────────────
+            # The kernel echoes input; sometimes the first char is lost so
+            # we match on a 16-char interior slice of the command instead.
+            cmd_body = cmd.strip()[1:17]  # skip first char, take 16
+            if (line.startswith(cmd.strip()[:20]) or
+                    line == cmd.strip() or
+                    (cmd_body and cmd_body in line and len(line) > 40)):
+                continue
+
+            lines.append(line)
+
+        # Partial buffer — only exit if it exactly matches the bare prompt
+        # with no preceding content. Never exit speculatively on timeout.
+        clean_buf = _strip_ansi(buf).strip()
+        if _debug and clean_buf:
+            print(f"  [partial] {repr(clean_buf)}", flush=True)
+        if clean_buf == prompt:
+            resume_reflex_listener()
+            return lines
+
+    resume_reflex_listener()
     return lines
 
 def wait_for_boot(sock) -> list:
@@ -595,47 +693,125 @@ def parse_response(text):
 # Steps through MOCK_SCRIPT in order; repeats the last entry if exhausted.
 
 MOCK_SCRIPT = [
-    # Step 1: introspect caps and EL, emit RESPOND
+    # Step 1: query hardware state — caps, EL, introspect
     {
-        "thought": "[mock] Step 1: query system capabilities and exception level.",
+        "thought": "[mock] Step 1: query hardware capabilities and exception level to understand the system.",
         "done": False,
         "aiql": {
             "type": "Program",
-            "intent": {"goal": "inspect_hardware"},
+            "intent": {"goal": "hardware_survey"},
             "body": [{
                 "type": "PipelineStatement",
                 "steps": [
                     {"type": "Operation", "name": "GetCaps"},
                     {"type": "Operation", "name": "GetExceptionLevel"},
+                    {"type": "Operation", "name": "IntrospectHardware"},
                     {"type": "Operation", "name": "RespondWithResult",
-                     "params": {"goal": "hardware_state"}}
+                     "params": {"goal": "hardware_survey"}}
                 ]
             }]
         }
     },
-    # Step 2: write a byte to scratch, read it back, respond
+    # Step 2: write a known value to scratch and read it back
     {
-        "thought": "[mock] Step 2: write 0xAB to scratch offset 0 and verify.",
+        "thought": "[mock] Step 2: hardware confirmed EL1 with full caps. Now verify scratch memory r/w.",
         "done": False,
         "aiql": {
             "type": "Program",
-            "intent": {"goal": "scratch_rw"},
+            "intent": {"goal": "scratch_verify"},
             "body": [{
                 "type": "PipelineStatement",
                 "steps": [
                     {"type": "Operation", "name": "WriteScratch",
                      "params": {"offset": 0, "value": "0xAB"}},
+                    {"type": "Operation", "name": "WriteScratch",
+                     "params": {"offset": 1, "value": "0xCD"}},
+                    {"type": "Operation", "name": "ReadMemory",
+                     "params": {"address": "0x40200000", "length": 4}},
                     {"type": "Operation", "name": "RespondWithResult",
                      "params": {"goal": "scratch_verified"}}
                 ]
             }]
         }
     },
-    # Step 3: declare done
+    # Step 3: classify the hardware state via model call
     {
-        "thought": "[mock] System state confirmed. Goal achieved.",
+        "thought": "[mock] Step 3: scratch r/w verified. Now classify the system state using a model call.",
+        "done": False,
+        "aiql": {
+            "type": "Program",
+            "intent": {"goal": "classify_state"},
+            "body": [{
+                "type": "PipelineStatement",
+                "steps": [
+                    {"type": "Operation", "name": "GetCaps"},
+                    {
+                        "type": "CallStatement",
+                        "call_type": "classifier",
+                        "action": "classify_system",
+                        "outputs": ["system_label"],
+                        "params": {
+                            "input": "caps=0xf el=1 scratch_rw=verified - classify readiness for autonomous operation"
+                        }
+                    },
+                    {"type": "Operation", "name": "RespondWithResult",
+                     "params": {"goal": "classify_state"}}
+                ]
+            }]
+        }
+    },
+    # Step 4: sleep and then do a second model call to plan next action
+    {
+        "thought": "[mock] Step 4: system classified as ready. Sleep briefly then query for recommended next action.",
+        "done": False,
+        "aiql": {
+            "type": "Program",
+            "intent": {"goal": "plan_next_action"},
+            "body": [{
+                "type": "PipelineStatement",
+                "steps": [
+                    {"type": "Operation", "name": "Sleep",
+                     "params": {"ms": 100}},
+                    {
+                        "type": "CallStatement",
+                        "call_type": "llm",
+                        "action": "recommend_action",
+                        "outputs": ["next_action"],
+                        "params": {
+                            "input": "system_label=ready caps=0xf el=1 - what should the kernel do next?"
+                        }
+                    },
+                    {"type": "Operation", "name": "RespondWithResult",
+                     "params": {"goal": "plan_next_action"}}
+                ]
+            }]
+        }
+    },
+    # Step 5: write the recommended action code to scratch and verify
+    {
+        "thought": "[mock] Step 5: action planned. Write action code 0xFF to scratch as confirmation token.",
+        "done": False,
+        "aiql": {
+            "type": "Program",
+            "intent": {"goal": "commit_action"},
+            "body": [{
+                "type": "PipelineStatement",
+                "steps": [
+                    {"type": "Operation", "name": "WriteScratch",
+                     "params": {"offset": 0, "value": "0xFF"}},
+                    {"type": "Operation", "name": "ReadMemory",
+                     "params": {"address": "0x40200000", "length": 2}},
+                    {"type": "Operation", "name": "RespondWithResult",
+                     "params": {"goal": "action_committed"}}
+                ]
+            }]
+        }
+    },
+    # Step 6: final summary — declare done
+    {
+        "thought": "[mock] Step 6: all stages complete. Hardware surveyed, scratch verified, system classified, action planned and committed.",
         "done": True,
-        "conclusion": "Hardware introspection complete. Caps=0xf, EL=1, scratch r/w verified."
+        "conclusion": "Full KAI OS agent loop verified: hardware survey → scratch r/w → model classification → LLM planning → action commit. All RESPOND: packets received with typed vars."
     },
 ]
 
@@ -724,6 +900,15 @@ def run_agent(goal, sock, provider, model, max_steps, dump_aiql, verbose, api_ke
             break
 
         # ── Validate AIQL ──────────────────────────────────────────────────
+        # Warn if any CallStatement input exceeds kernel MODEL_INPUT_MAX_LEN (64)
+        for _stmt in aiql_program.get("body", []):
+            for _s in _stmt.get("steps", []):
+                if _s.get("type") == "CallStatement":
+                    inp = _s.get("params", {}).get("input", "")
+                    if len(inp) > 63:
+                        print(c(f"  [warn]   CallStatement input truncated to 63 chars: {repr(inp[:20])}...", C.DIM))
+                        _s["params"]["input"] = inp[:63]
+
         errors = validate_aiql(aiql_program)
         if errors:
             log_error(f"AIQL validation failed: {errors}")
@@ -748,7 +933,6 @@ def run_agent(goal, sock, provider, model, max_steps, dump_aiql, verbose, api_ke
         # ── Send AIQL JSON directly to kernel `aiql` command ─────────────
         aiql_json = json.dumps(aiql_program, separators=(',', ':'))
         cmd = f"aiql {aiql_json}"
-        log_aiql(aiql_program)
         output_lines = send_command(sock, cmd, provider=provider, model=model, api_key=api_key)
         for line in output_lines:
             log_kernel(line)

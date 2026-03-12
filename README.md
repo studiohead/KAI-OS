@@ -4,7 +4,7 @@
 
 How do you give an AI model meaningful control over a system without giving it arbitrary code execution?
 
-KAI is a formally verified, capability-gated, pipeline-based command language that sits between the AI and the hardware. The AI can only do what the verifier permits, and the verifier runs before any execution. Hardware enforcement (MMU + EL0 isolation) means this guarantee holds even if there is a bug in the interpreter.
+KAI is a capability-gated pipeline-based command language that sits between the AI and the hardware. The AI can only do what the verifier permits, and the verifier runs before any execution. Hardware enforcement (MMU + EL0 isolation) means this guarantee holds even if there is a bug in the interpreter.
 
 ---
 

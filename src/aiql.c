@@ -402,6 +402,10 @@ static bool build_step(const char *obj, const char *oend,
                 if (!inp[0]) get_str(mp, msz, "prompt", inp, sizeof(inp));
                 if (!inp[0]) get_str(mp, msz, "text",   inp, sizeof(inp));
                 if (!inp[0]) get_str(mp, msz, "query",  inp, sizeof(inp));
+                /* Warn if input was silently truncated at MODEL_INPUT_MAX_LEN */
+                if (inp[MODEL_INPUT_MAX_LEN-1] != '\0') {
+                    uart_puts("[aiql] warn: model input truncated at 63 chars\r\n");
+                }
                 copy_str(step->model_input, inp, MODEL_INPUT_MAX_LEN,
                          inp + MODEL_INPUT_MAX_LEN);
             }
